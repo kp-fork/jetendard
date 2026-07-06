@@ -21,6 +21,10 @@ make run
 make test
 ```
 
+`make run` builds the full 16-variant family. Use `make run-minimal` for the
+initial fast subset (`Regular`, `Light`, `Bold`) and `make run-all` as an
+explicit alias for the full build.
+
 Generated files are written to:
 
 - `fonts/ttf/Jetendard-*.ttf`
@@ -40,7 +44,11 @@ Important options:
 
 - `--latin-dir`: directory containing `JetBrainsMonoNerdFontMono-*.ttf`
 - `--cjk-dir`: directory containing `Pretendard-*.ttf`
-- `--weights`: weights to build, defaulting to `Regular Light Bold`
+- `--all`: build the full 16-variant matrix
+- `--variants`: explicit output variants such as `Regular`, `Italic`, or `BoldItalic`
+- `--weights`: weights to build; without `--styles`, this selects upright variants
+- `--styles`: `normal`, `italic`, or both
+- `--korean-italic-mode`: Korean/CJK policy for italic variants, currently `upright`
 - `--korean-scale`: visual scale for Korean/CJK glyph fitting
 - `--scale`: compatibility alias for `--korean-scale`
 
@@ -48,12 +56,46 @@ The default Korean scale is `1.08`. The builder caps glyphs that would exceed
 safe horizontal or vertical bounds, while keeping every Korean/CJK advance width
 at exactly two measured Latin advances.
 
+Examples:
+
+```bash
+uv run jetendard --all
+uv run jetendard --weights Regular Bold --styles normal italic
+uv run jetendard --variants Regular Light Bold
+```
+
+## Variant Coverage
+
+Jetendard builds every ligature-enabled `JetBrainsMonoNerdFontMono` Mono TTF
+variant present in the pinned Nerd Fonts archive:
+
+| Weight | Upright | Italic | Pretendard Korean/CJK source |
+| --- | --- | --- | --- |
+| Thin | `Jetendard-Thin` | `Jetendard-ThinItalic` | `Pretendard-Thin` |
+| ExtraLight | `Jetendard-ExtraLight` | `Jetendard-ExtraLightItalic` | `Pretendard-ExtraLight` |
+| Light | `Jetendard-Light` | `Jetendard-LightItalic` | `Pretendard-Light` |
+| Regular | `Jetendard-Regular` | `Jetendard-Italic` | `Pretendard-Regular` |
+| Medium | `Jetendard-Medium` | `Jetendard-MediumItalic` | `Pretendard-Medium` |
+| SemiBold | `Jetendard-SemiBold` | `Jetendard-SemiBoldItalic` | `Pretendard-SemiBold` |
+| Bold | `Jetendard-Bold` | `Jetendard-BoldItalic` | `Pretendard-Bold` |
+| ExtraBold | `Jetendard-ExtraBold` | `Jetendard-ExtraBoldItalic` | `Pretendard-ExtraBold` |
+
+Pretendard does not provide true static italic Korean/CJK fonts in the pinned
+archive, so italic Jetendard variants use italic JetBrainsMono Latin glyphs and
+upright Pretendard Korean/CJK glyphs. The generated font metadata and CSS still
+identify those variants as italic.
+
 ## Scope
 
 Jetendard only uses `JetBrainsMonoNerdFontMono`. It does not use
 `JetBrainsMonoNerdFont`, `JetBrainsMonoNerdFontPropo`, or `JetBrainsMonoNL`
 no-ligature variants. Because the base font is already Nerd Font patched, this
 project does not run a second Nerd Fonts patching step.
+
+`Pretendard-Black` is not built by default because the confirmed
+`JetBrainsMonoNerdFontMono` archive does not contain a matching Black source.
+The downloader also extracts `PretendardVariable.ttf` when available for future
+custom-weight work.
 
 ## Visual Check Samples
 
@@ -71,10 +113,11 @@ if (상태 === "완료") return "성공";
 
 ## Release Packaging
 
-The initial build writes installable files under `fonts/ttf`, `fonts/otf`, and
+The build writes installable files under `fonts/ttf`, `fonts/otf`, and
 `fonts/webfont`. Release archives can be prepared from those directories after a
-manual visual pass confirms the default Korean scale. The OTF files are
-OTF-compatible outputs using the same TrueType outlines as the generated TTFs.
+manual visual pass confirms the default Korean scale across upright and italic
+variants. The OTF files are OTF-compatible outputs using the same TrueType
+outlines as the generated TTFs.
 
 ## License
 

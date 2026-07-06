@@ -5,9 +5,15 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import urllib.request
 import zipfile
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from jetendard.builder import DEFAULT_VARIANTS, SUPPORTED_WEIGHTS  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,11 +30,11 @@ PRETENDARD_URL = (
     f"v{PRETENDARD_VERSION}/Pretendard-{PRETENDARD_VERSION}.zip"
 )
 
-DEFAULT_WEIGHTS = ("Regular", "Light", "Bold")
 UPSTREAM_DIR = Path("upstream")
 ARCHIVE_DIR = UPSTREAM_DIR / "_archives"
 JETBRAINS_DIR = UPSTREAM_DIR / "jetbrainsmono"
 PRETENDARD_DIR = UPSTREAM_DIR / "pretendard"
+OPTIONAL_PRETENDARD_FILES = ("PretendardVariable.ttf",)
 
 
 def download_file(url: str, output_path: Path) -> None:
@@ -74,10 +80,13 @@ def download_file(url: str, output_path: Path) -> None:
 def extract_expected_fonts(
     archive_path: Path,
     output_dir: Path,
-    expected_basenames: set[str],
+    required_basenames: set[str],
+    optional_basenames: set[str] | None = None,
 ) -> None:
     """Extract the requested font basenames from a zip archive."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    optional_basenames = optional_basenames or set()
+    expected_basenames = required_basenames | optional_basenames
     found: dict[str, str] = {}
 
     with zipfile.ZipFile(archive_path) as archive:
@@ -94,7 +103,7 @@ def extract_expected_fonts(
                 shutil.copyfileobj(source, target)
             found[basename] = member.filename
 
-    missing = sorted(expected_basenames - set(found))
+    missing = sorted(required_basenames - set(found))
     if missing:
         msg = (
             f"{archive_path} did not contain expected files: {', '.join(missing)}. "
@@ -102,17 +111,37 @@ def extract_expected_fonts(
         )
         raise FileNotFoundError(msg)
 
+    missing_optional = sorted(optional_basenames - set(found))
+    if missing_optional:
+        logger.warning(
+            "%s did not contain optional files: %s",
+            archive_path,
+            ", ".join(missing_optional),
+        )
+
 
 def write_sources_note() -> None:
     """Write a small note documenting the downloaded upstream versions."""
+    jetbrains_files = sorted({variant.latin_filename for variant in DEFAULT_VARIANTS})
+    pretendard_files = [f"Pretendard-{weight}.ttf" for weight in SUPPORTED_WEIGHTS]
     note = "\n".join(
         [
             "# Jetendard Upstream Sources",
             "",
             f"- Nerd Fonts JetBrainsMono: {NERD_FONTS_VERSION}",
             f"- Pretendard: {PRETENDARD_VERSION}",
-            "- Extracted JetBrains files: JetBrainsMonoNerdFontMono Regular, Light, Bold.",
-            "- Extracted Pretendard files: Regular, Light, Bold.",
+            "",
+            "## Extracted JetBrainsMono Nerd Font Mono Files",
+            "",
+            *[f"- `{filename}`" for filename in jetbrains_files],
+            "",
+            "## Extracted Pretendard Files",
+            "",
+            *[f"- `{filename}`" for filename in pretendard_files],
+            *[
+                f"- `{filename}` (optional future variable-weight support)"
+                for filename in OPTIONAL_PRETENDARD_FILES
+            ],
             "",
         ]
     )
@@ -124,14 +153,19 @@ def main() -> int:
     jetbrains_archive = ARCHIVE_DIR / f"JetBrainsMono-{NERD_FONTS_VERSION}.zip"
     pretendard_archive = ARCHIVE_DIR / f"Pretendard-{PRETENDARD_VERSION}.zip"
 
-    jetbrains_expected = {f"JetBrainsMonoNerdFontMono-{weight}.ttf" for weight in DEFAULT_WEIGHTS}
-    pretendard_expected = {f"Pretendard-{weight}.ttf" for weight in DEFAULT_WEIGHTS}
+    jetbrains_expected = {variant.latin_filename for variant in DEFAULT_VARIANTS}
+    pretendard_expected = {f"Pretendard-{weight}.ttf" for weight in SUPPORTED_WEIGHTS}
 
     try:
         download_file(JETBRAINS_MONO_URL, jetbrains_archive)
         download_file(PRETENDARD_URL, pretendard_archive)
         extract_expected_fonts(jetbrains_archive, JETBRAINS_DIR, jetbrains_expected)
-        extract_expected_fonts(pretendard_archive, PRETENDARD_DIR, pretendard_expected)
+        extract_expected_fonts(
+            pretendard_archive,
+            PRETENDARD_DIR,
+            pretendard_expected,
+            optional_basenames=set(OPTIONAL_PRETENDARD_FILES),
+        )
         write_sources_note()
     except Exception:
         logger.exception("Failed to prepare upstream resources")

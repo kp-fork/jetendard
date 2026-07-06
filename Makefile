@@ -1,4 +1,4 @@
-.PHONY: dev lint format test build download run clean
+.PHONY: dev lint format test build download ensure-upstream run run-all run-minimal clean
 
 dev:
 	uv sync --all-groups
@@ -19,12 +19,20 @@ build:
 download:
 	uv run python download_upstream.py
 
-run:
+ensure-upstream:
 	@if [ ! -d "upstream/jetbrainsmono" ] || [ ! -d "upstream/pretendard" ]; then \
 		echo "Upstream font resources not found. Downloading..."; \
 		$(MAKE) download; \
 	fi
-	uv run jetendard
+
+run: ensure-upstream
+	uv run jetendard --all
+
+run-all: ensure-upstream
+	uv run jetendard --all
+
+run-minimal: ensure-upstream
+	uv run jetendard --variants Regular Light Bold
 
 clean:
 	rm -rf fonts/ttf fonts/otf fonts/webfont fonts/specimens

@@ -21,18 +21,6 @@ logger = logging.getLogger(__name__)
 Bounds = tuple[float, float, float, float]
 
 DEFAULT_KOREAN_SCALE = 1.08
-DEFAULT_WEIGHTS = ("Regular", "Light", "Bold")
-SUPPORTED_WEIGHTS = (
-    "Thin",
-    "ExtraLight",
-    "Light",
-    "Regular",
-    "Medium",
-    "SemiBold",
-    "Bold",
-    "ExtraBold",
-    "Black",
-)
 ASCII_WIDTH_SAMPLE = tuple(ord(char) for char in " A0Hinmw")
 
 
@@ -110,6 +98,110 @@ class MergeStats:
     latin_advance: int
     korean_advance: int
     requested_total_scale: float
+
+
+@dataclass(frozen=True)
+class FontVariant:
+    """One buildable Jetendard output variant."""
+
+    weight_name: str
+    css_weight: int
+    style: str
+    latin_filename: str
+    cjk_weight_name: str
+    output_suffix: str
+    subfamily_name: str
+    typographic_subfamily_name: str
+    is_italic: bool
+
+
+WEIGHT_TO_CSS = {
+    "Thin": 100,
+    "ExtraLight": 200,
+    "Light": 300,
+    "Regular": 400,
+    "Medium": 500,
+    "SemiBold": 600,
+    "Bold": 700,
+    "ExtraBold": 800,
+}
+SUPPORTED_WEIGHTS = tuple(WEIGHT_TO_CSS)
+DEFAULT_WEIGHTS = SUPPORTED_WEIGHTS
+SUPPORTED_STYLES = ("normal", "italic")
+
+
+def make_font_variant(weight_name: str, style: str) -> FontVariant:
+    """Create a build variant for a supported weight/style pair."""
+    if weight_name not in WEIGHT_TO_CSS:
+        supported = ", ".join(SUPPORTED_WEIGHTS)
+        msg = f"Unsupported weight {weight_name!r}. Supported: {supported}"
+        raise ValueError(msg)
+    if style not in SUPPORTED_STYLES:
+        supported = ", ".join(SUPPORTED_STYLES)
+        msg = f"Unsupported style {style!r}. Supported: {supported}"
+        raise ValueError(msg)
+
+    is_italic = style == "italic"
+    if is_italic:
+        latin_suffix = "Italic" if weight_name == "Regular" else f"{weight_name}Italic"
+        output_suffix = latin_suffix
+        subfamily_name = "Italic" if weight_name == "Regular" else f"{weight_name} Italic"
+    else:
+        latin_suffix = weight_name
+        output_suffix = weight_name
+        subfamily_name = weight_name
+
+    return FontVariant(
+        weight_name=weight_name,
+        css_weight=WEIGHT_TO_CSS[weight_name],
+        style=style,
+        latin_filename=f"JetBrainsMonoNerdFontMono-{latin_suffix}.ttf",
+        cjk_weight_name=weight_name,
+        output_suffix=output_suffix,
+        subfamily_name=subfamily_name,
+        typographic_subfamily_name=subfamily_name,
+        is_italic=is_italic,
+    )
+
+
+DEFAULT_VARIANTS = tuple(
+    make_font_variant(weight_name, style)
+    for weight_name in SUPPORTED_WEIGHTS
+    for style in SUPPORTED_STYLES
+)
+VARIANTS_BY_SUFFIX = {variant.output_suffix: variant for variant in DEFAULT_VARIANTS}
+
+
+def get_variants_by_names(variant_names: list[str] | tuple[str, ...]) -> list[FontVariant]:
+    """Resolve output suffix names to variants, preserving request order."""
+    variants: list[FontVariant] = []
+    seen: set[str] = set()
+    unsupported: list[str] = []
+
+    for name in variant_names:
+        variant = VARIANTS_BY_SUFFIX.get(name)
+        if variant is None:
+            unsupported.append(name)
+            continue
+        if variant.output_suffix in seen:
+            continue
+        variants.append(variant)
+        seen.add(variant.output_suffix)
+
+    if unsupported:
+        supported = ", ".join(VARIANTS_BY_SUFFIX)
+        msg = f"Unsupported variant(s): {', '.join(unsupported)}. Supported: {supported}"
+        raise ValueError(msg)
+
+    return variants
+
+
+def get_variants_by_weights_and_styles(
+    weights: list[str] | tuple[str, ...],
+    styles: list[str] | tuple[str, ...],
+) -> list[FontVariant]:
+    """Resolve weight/style selectors to variants."""
+    return [make_font_variant(weight, style) for weight in weights for style in styles]
 
 
 def is_cjk(code: int) -> bool:
@@ -257,15 +349,21 @@ def calculate_fitted_transform(
     )
 
 
-def update_font_names(font: TTFont, family_name: str, subfamily_name: str) -> None:
+def update_font_names(
+    font: TTFont,
+    family_name: str,
+    subfamily_name: str,
+    typographic_subfamily_name: str | None = None,
+) -> None:
     """Update family, subfamily, full, PostScript, and typographic names."""
     logger.info("Updating font names to %s %s", family_name, subfamily_name)
     name_table = font["name"]
 
+    typographic_subfamily = typographic_subfamily_name or subfamily_name
     ps_family = "".join(family_name.split())
-    ps_subfamily = "".join(subfamily_name.split())
+    ps_subfamily = "".join(typographic_subfamily.split())
     ps_name = f"{ps_family}-{ps_subfamily}"
-    full_name = f"{family_name} {subfamily_name}"
+    full_name = f"{family_name} {typographic_subfamily}"
     head_table = cast("Any", font["head"])
     unique_id = f"{ps_name};{head_table.fontRevision:.3f}"
 
@@ -276,7 +374,7 @@ def update_font_names(font: TTFont, family_name: str, subfamily_name: str) -> No
         4: full_name,
         6: ps_name,
         16: family_name,
-        17: subfamily_name,
+        17: typographic_subfamily,
     }
 
     for name_id, value in values.items():
@@ -291,6 +389,45 @@ def update_font_names(font: TTFont, family_name: str, subfamily_name: str) -> No
             record.string = value.encode(record.getEncoding())
         except Exception as exc:
             logger.warning("Failed to update name record %d: %s", record.nameID, exc)
+
+
+def update_style_metadata(
+    font: TTFont,
+    *,
+    is_italic: bool,
+    css_weight: int | None = None,
+    is_regular: bool = False,
+) -> None:
+    """Set style bits and weight metadata that identify upright and italic variants."""
+    head_table = cast("Any", font["head"])
+    os2_table = cast("Any", font["OS/2"])
+
+    mac_bold = 1 << 0
+    mac_italic = 1 << 1
+    fs_italic = 1 << 0
+    fs_bold = 1 << 5
+    fs_regular = 1 << 6
+
+    if is_italic:
+        head_table.macStyle |= mac_italic
+        os2_table.fsSelection |= fs_italic
+    else:
+        head_table.macStyle &= ~mac_italic
+        os2_table.fsSelection &= ~fs_italic
+
+    if css_weight is not None:
+        os2_table.usWeightClass = css_weight
+        if css_weight >= 700:
+            head_table.macStyle |= mac_bold
+            os2_table.fsSelection |= fs_bold
+        else:
+            head_table.macStyle &= ~mac_bold
+            os2_table.fsSelection &= ~fs_bold
+
+    if is_regular and not is_italic:
+        os2_table.fsSelection |= fs_regular
+    else:
+        os2_table.fsSelection &= ~fs_regular
 
 
 def enforce_monospace_flags(font: TTFont) -> None:
@@ -463,6 +600,10 @@ def merge_fonts(
     family_name: str,
     subfamily_name: str,
     korean_scale: float = DEFAULT_KOREAN_SCALE,
+    *,
+    typographic_subfamily_name: str | None = None,
+    is_italic: bool = False,
+    css_weight: int | None = None,
 ) -> MergeStats:
     """Merge JetBrainsMono Nerd Font Mono with Pretendard CJK glyphs."""
     logger.info("Merging %s + %s -> %s", latin_path, cjk_path, output_path)
@@ -556,7 +697,18 @@ def merge_fonts(
     enforce_monospace_flags(latin_font)
     add_hangul_ccmp_features(latin_font)
     glyph_order = sync_glyph_order(latin_font, glyf_table, glyph_order)
-    update_font_names(latin_font, family_name, subfamily_name)
+    update_style_metadata(
+        latin_font,
+        is_italic=is_italic,
+        css_weight=css_weight,
+        is_regular=subfamily_name == "Regular",
+    )
+    update_font_names(
+        latin_font,
+        family_name,
+        subfamily_name,
+        typographic_subfamily_name=typographic_subfamily_name,
+    )
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)

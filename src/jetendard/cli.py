@@ -11,24 +11,17 @@ from fontTools.ttLib import TTFont
 
 from jetendard.builder import (
     DEFAULT_KOREAN_SCALE,
+    DEFAULT_VARIANTS,
     DEFAULT_WEIGHTS,
+    SUPPORTED_STYLES,
     SUPPORTED_WEIGHTS,
+    FontVariant,
+    get_variants_by_names,
+    get_variants_by_weights_and_styles,
     merge_fonts,
 )
 
 logger = logging.getLogger(__name__)
-
-WEIGHT_TO_CSS = {
-    "Thin": 100,
-    "ExtraLight": 200,
-    "Light": 300,
-    "Regular": 400,
-    "Medium": 500,
-    "SemiBold": 600,
-    "Bold": 700,
-    "ExtraBold": 800,
-    "Black": 900,
-}
 
 
 def family_file_stem(family_name: str) -> str:
@@ -36,20 +29,20 @@ def family_file_stem(family_name: str) -> str:
     return "".join(family_name.split())
 
 
-def write_css(output_web_dir: Path, family_name: str, weights: list[str]) -> Path:
+def write_css(output_web_dir: Path, family_name: str, variants: list[FontVariant]) -> Path:
     """Generate @font-face rules for compiled web fonts."""
     css_content: list[str] = []
     stem = family_file_stem(family_name)
-    for weight in weights:
-        font_filename = f"{stem}-{weight}.woff2"
+    for variant in variants:
+        font_filename = f"{stem}-{variant.output_suffix}.woff2"
         css_content.append(
             "\n".join(
                 [
                     "@font-face {",
                     f"  font-family: '{family_name}';",
                     f"  src: url('./{font_filename}') format('woff2');",
-                    f"  font-weight: {WEIGHT_TO_CSS[weight]};",
-                    "  font-style: normal;",
+                    f"  font-weight: {variant.css_weight};",
+                    f"  font-style: {variant.style};",
                     "  font-display: swap;",
                     "}",
                     "",
@@ -105,20 +98,100 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--weights",
         nargs="+",
-        default=list(DEFAULT_WEIGHTS),
-        help="Weights to generate (default: Regular Light Bold).",
+        default=None,
+        help=(
+            "Weights to generate. With no --styles, this builds upright variants only. "
+            f"Supported: {', '.join(SUPPORTED_WEIGHTS)}."
+        ),
+    )
+    parser.add_argument(
+        "--styles",
+        nargs="+",
+        default=None,
+        choices=SUPPORTED_STYLES,
+        help="Styles to generate with --weights, or across all weights when --weights is omitted.",
+    )
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        default=None,
+        help=(
+            "Explicit output variants to generate, for example Regular Italic BoldItalic. "
+            "Cannot be combined with --weights or --styles."
+        ),
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Build the full 16-variant Jetendard coverage matrix.",
+    )
+    parser.add_argument(
+        "--korean-italic-mode",
+        choices=("upright",),
+        default="upright",
+        help=("Korean/CJK glyph policy for italic variants. Currently only upright is supported."),
     )
     return parser
 
 
+def dedupe_preserving_order(values: list[str]) -> list[str]:
+    """Remove duplicates while preserving user-specified order."""
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        deduped.append(value)
+        seen.add(value)
+    return deduped
+
+
 def validate_weights(weights: list[str]) -> list[str]:
     """Validate requested weight names."""
-    unsupported = [weight for weight in weights if weight not in SUPPORTED_WEIGHTS]
+    deduped = dedupe_preserving_order(weights)
+    unsupported = [weight for weight in deduped if weight not in SUPPORTED_WEIGHTS]
     if unsupported:
         supported = ", ".join(SUPPORTED_WEIGHTS)
         msg = f"Unsupported weight(s): {', '.join(unsupported)}. Supported: {supported}"
         raise ValueError(msg)
-    return weights
+    return deduped
+
+
+def validate_styles(styles: list[str]) -> list[str]:
+    """Validate requested style names."""
+    deduped = dedupe_preserving_order(styles)
+    unsupported = [style for style in deduped if style not in SUPPORTED_STYLES]
+    if unsupported:
+        supported = ", ".join(SUPPORTED_STYLES)
+        msg = f"Unsupported style(s): {', '.join(unsupported)}. Supported: {supported}"
+        raise ValueError(msg)
+    return deduped
+
+
+def select_variants(
+    *,
+    all_variants: bool = False,
+    variant_names: list[str] | None = None,
+    weights: list[str] | None = None,
+    styles: list[str] | None = None,
+) -> list[FontVariant]:
+    """Resolve CLI selectors to build variants."""
+    if all_variants and (variant_names or weights or styles):
+        msg = "--all cannot be combined with --variants, --weights, or --styles"
+        raise ValueError(msg)
+    if variant_names and (weights or styles):
+        msg = "--variants cannot be combined with --weights or --styles"
+        raise ValueError(msg)
+
+    if all_variants or (variant_names is None and weights is None and styles is None):
+        return list(DEFAULT_VARIANTS)
+
+    if variant_names:
+        return get_variants_by_names(variant_names)
+
+    selected_weights = validate_weights(weights if weights is not None else list(DEFAULT_WEIGHTS))
+    selected_styles = validate_styles(styles if styles is not None else ["normal"])
+    return get_variants_by_weights_and_styles(selected_weights, selected_styles)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,7 +202,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     try:
-        weights = validate_weights(list(args.weights))
+        variants = select_variants(
+            all_variants=args.all,
+            variant_names=args.variants,
+            weights=args.weights,
+            styles=args.styles,
+        )
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -145,14 +223,17 @@ def main(argv: list[str] | None = None) -> int:
     web_dir.mkdir(parents=True, exist_ok=True)
 
     stem = family_file_stem(args.family_name)
-    logger.info("Starting Jetendard build for weights: %s", ", ".join(weights))
+    logger.info(
+        "Starting Jetendard build for variants: %s",
+        ", ".join(variant.output_suffix for variant in variants),
+    )
 
-    for weight in weights:
-        latin_path = latin_dir / f"JetBrainsMonoNerdFontMono-{weight}.ttf"
-        cjk_path = cjk_dir / f"Pretendard-{weight}.ttf"
-        output_path_ttf = ttf_dir / f"{stem}-{weight}.ttf"
-        output_path_otf = otf_dir / f"{stem}-{weight}.otf"
-        output_path_woff2 = web_dir / f"{stem}-{weight}.woff2"
+    for variant in variants:
+        latin_path = latin_dir / variant.latin_filename
+        cjk_path = cjk_dir / f"Pretendard-{variant.cjk_weight_name}.ttf"
+        output_path_ttf = ttf_dir / f"{stem}-{variant.output_suffix}.ttf"
+        output_path_otf = otf_dir / f"{stem}-{variant.output_suffix}.otf"
+        output_path_woff2 = web_dir / f"{stem}-{variant.output_suffix}.woff2"
 
         if not latin_path.exists():
             logger.error("Latin font file not found: %s", latin_path)
@@ -169,12 +250,15 @@ def main(argv: list[str] | None = None) -> int:
                 cjk_path=cjk_path,
                 output_path=output_path_ttf,
                 family_name=args.family_name,
-                subfamily_name=weight,
+                subfamily_name=variant.subfamily_name,
                 korean_scale=args.korean_scale,
+                typographic_subfamily_name=variant.typographic_subfamily_name,
+                is_italic=variant.is_italic,
+                css_weight=variant.css_weight,
             )
             logger.info(
                 "%s: copied=%d capped=%d latin_advance=%d korean_advance=%d",
-                weight,
+                variant.output_suffix,
                 stats.copied_count,
                 stats.capped_count,
                 stats.latin_advance,
@@ -193,11 +277,11 @@ def main(argv: list[str] | None = None) -> int:
             web_font.save(str(output_path_woff2))
             web_font.close()
         except Exception:
-            logger.exception("Failed to build weight %s", weight)
+            logger.exception("Failed to build variant %s", variant.output_suffix)
             return 1
 
-    write_css(web_dir, args.family_name, weights)
-    logger.info("All requested Jetendard weights built successfully")
+    write_css(web_dir, args.family_name, variants)
+    logger.info("All requested Jetendard variants built successfully")
     return 0
 
 
